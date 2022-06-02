@@ -2,9 +2,10 @@
 use cosmwasm_std::entry_point;
 use cosmwasm_std::{to_binary, Binary, Deps, DepsMut, Env, MessageInfo, Response, StdResult};
 use cw2::set_contract_version;
+use cosmwasm_std::Addr;
 
 use crate::error::ContractError;
-use crate::msg::{CountResponse, ExecuteMsg, InstantiateMsg, QueryMsg};
+use crate::msg::{CountResponse, OwnerResponce, ExecuteMsg, InstantiateMsg, QueryMsg};
 use crate::state::{State, STATE};
 
 // version info for migration info
@@ -41,6 +42,7 @@ pub fn execute(
     match msg {
         ExecuteMsg::Increment {} => try_increment(deps),
         ExecuteMsg::Reset { count } => try_reset(deps, info, count),
+        ExecuteMsg::ResetOwner {owner} => try_update_owner(deps, info, owner),
     }
 }
 
@@ -64,16 +66,33 @@ pub fn try_reset(deps: DepsMut, info: MessageInfo, count: i32) -> Result<Respons
     Ok(Response::new().add_attribute("method", "reset"))
 }
 
+pub fn try_update_owner(deps: DepsMut, info: MessageInfo, owner: Addr) -> Result<Response, ContractError> {
+    STATE.update(deps.storage, |mut state| -> Result<_, ContractError> {
+        if info.sender != state.owner {
+            return Err(ContractError::Unauthorized {});
+        }
+        state.owner = owner;
+        Ok(state)
+    })?;
+    Ok(Response::new().add_attribute("method", "try_update_owner"))
+}
+
 #[cfg_attr(not(feature = "library"), entry_point)]
 pub fn query(deps: Deps, _env: Env, msg: QueryMsg) -> StdResult<Binary> {
     match msg {
         QueryMsg::GetCount {} => to_binary(&query_count(deps)?),
+        QueryMsg::GetOwner {} => to_binary(&query_owner(deps)?),
     }
 }
 
 fn query_count(deps: Deps) -> StdResult<CountResponse> {
     let state = STATE.load(deps.storage)?;
     Ok(CountResponse { count: state.count })
+}
+
+fn query_owner(deps: Deps) -> StdResult<OwnerResponce> {
+    let state = STATE.load(deps.storage)?;
+    Ok(OwnerResponce { owner: state.owner})
 }
 
 #[cfg(test)]
@@ -97,6 +116,10 @@ mod tests {
         let res = query(deps.as_ref(), mock_env(), QueryMsg::GetCount {}).unwrap();
         let value: CountResponse = from_binary(&res).unwrap();
         assert_eq!(17, value.count);
+
+        let res = query(deps.as_ref(), mock_env(), QueryMsg::GetOwner {}).unwrap();
+        let value: OwnerResponce = from_binary(&res).unwrap();
+        assert_eq!("creator", value.owner)
     }
 
     #[test]
@@ -144,5 +167,15 @@ mod tests {
         let res = query(deps.as_ref(), mock_env(), QueryMsg::GetCount {}).unwrap();
         let value: CountResponse = from_binary(&res).unwrap();
         assert_eq!(5, value.count);
+
+        //
+        let new_owner = mock_info("max", &coins(2, "token"));
+        let old_owner = mock_info("creator", &coins(2, "token"));
+        let msg = ExecuteMsg::ResetOwner {owner: new_owner.sender};
+        let _res = execute(deps.as_mut(), mock_env(), old_owner, msg).unwrap();
+
+        let res = query(deps.as_ref(), mock_env(), QueryMsg::GetOwner {}).unwrap();
+        let value: OwnerResponce = from_binary(&res).unwrap();
+        assert_eq!("max", value.owner);
     }
 }
