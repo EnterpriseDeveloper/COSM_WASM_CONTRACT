@@ -1,12 +1,12 @@
 #[cfg(not(feature = "library"))]
 use cosmwasm_std::entry_point;
+use cosmwasm_std::Addr;
 use cosmwasm_std::{to_binary, Binary, Deps, DepsMut, Env, MessageInfo, Response, StdResult};
 use cw2::set_contract_version;
-use cosmwasm_std::Addr;
 
 use crate::error::ContractError;
-use crate::msg::{CountResponse, OwnerResponce, ExecuteMsg, InstantiateMsg, QueryMsg};
-use crate::state::{State, STATE};
+use crate::msg::{CountResponse, ExecuteMsg, InstantiateMsg, OwnerResponce, QueryMsg};
+use crate::state::{State, ENTRIES, STATE};
 
 // version info for migration info
 const CONTRACT_NAME: &str = "crates.io:sc101";
@@ -42,8 +42,39 @@ pub fn execute(
     match msg {
         ExecuteMsg::Increment {} => try_increment(deps),
         ExecuteMsg::Reset { count } => try_reset(deps, info, count),
-        ExecuteMsg::ResetOwner {owner} => try_update_owner(deps, info, owner),
+        ExecuteMsg::ResetOwner { owner } => try_update_owner(deps, info, owner),
+        ExecuteMsg::EnterRaffle { entering_address } => {
+            try_upsert_entry(deps, info, entering_address)
+        }
     }
+}
+
+pub fn try_upsert_entry(
+    deps: DepsMut,
+    info: MessageInfo,
+    entering_address: String,
+) -> Result<Response, ContractError> {
+    // check whether user is admin
+    let entry_address = deps.api.addr_validate(&entering_address)?;
+    let state = STATE.load(deps.storage)?;
+    let increment_entry = |e: Option<u8>| -> StdResult<u8> {
+        match e {
+            Some(number) => Ok(number + 1),
+            None => Ok(1),
+        }
+    };
+
+    if info.sender != entry_address {
+        if info.sender != state.owner {
+            return Err(ContractError::WrongAddress {});
+        } else {
+            ENTRIES.update(deps.storage, &entry_address, increment_entry)?;
+        }
+    } else {
+        ENTRIES.update(deps.storage, &entry_address, increment_entry)?;
+    }
+
+    Ok(Response::new().add_attribute("method", "try_upset_entry"))
 }
 
 pub fn try_increment(deps: DepsMut) -> Result<Response, ContractError> {
@@ -66,7 +97,11 @@ pub fn try_reset(deps: DepsMut, info: MessageInfo, count: i32) -> Result<Respons
     Ok(Response::new().add_attribute("method", "reset"))
 }
 
-pub fn try_update_owner(deps: DepsMut, info: MessageInfo, owner: Addr) -> Result<Response, ContractError> {
+pub fn try_update_owner(
+    deps: DepsMut,
+    info: MessageInfo,
+    owner: Addr,
+) -> Result<Response, ContractError> {
     STATE.update(deps.storage, |mut state| -> Result<_, ContractError> {
         if info.sender != state.owner {
             return Err(ContractError::Unauthorized {});
@@ -82,6 +117,11 @@ pub fn query(deps: Deps, _env: Env, msg: QueryMsg) -> StdResult<Binary> {
     match msg {
         QueryMsg::GetCount {} => to_binary(&query_count(deps)?),
         QueryMsg::GetOwner {} => to_binary(&query_owner(deps)?),
+        QueryMsg::GetEntry {entry_address} => {
+            let valid_address = deps.api.addr_validate(&entry_address)?;
+            let raw_entry = ENTRIES.load(deps.storage, &valid_address)?;
+            to_binary(&raw_entry)
+        },
     }
 }
 
@@ -92,7 +132,7 @@ fn query_count(deps: Deps) -> StdResult<CountResponse> {
 
 fn query_owner(deps: Deps) -> StdResult<OwnerResponce> {
     let state = STATE.load(deps.storage)?;
-    Ok(OwnerResponce { owner: state.owner})
+    Ok(OwnerResponce { owner: state.owner })
 }
 
 #[cfg(test)]
@@ -120,6 +160,31 @@ mod tests {
         let res = query(deps.as_ref(), mock_env(), QueryMsg::GetOwner {}).unwrap();
         let value: OwnerResponce = from_binary(&res).unwrap();
         assert_eq!("creator", value.owner)
+    }
+
+    #[test]
+    fn enter_address() {
+        let mut deps = mock_dependencies_with_balance(&coins(2, "token"));
+
+        let msg = InstantiateMsg { count: 17 };
+        let info = mock_info("creator", &coins(2, "token"));
+        let _res = instantiate(deps.as_mut(), mock_env(), info, msg).unwrap();
+
+        // admin can submit their own address
+        let info = mock_info("creator", &coins(2, "token"));
+        let msg = ExecuteMsg::EnterRaffle {entering_address: "creator".to_string()};
+        let _res = execute(deps.as_mut(), mock_env(), info, msg).unwrap();
+
+        // query the address
+        let res = query(deps.as_ref(), mock_env(), QueryMsg::GetEntry {entry_address: "creator".to_string()}).unwrap();
+        let num_entries: u8 = from_binary(&res).unwrap();
+        assert_eq!(1, num_entries);
+        
+        // user cannot submit another address
+      //  let info = mock_info("anyone", &coins(2, "token"));
+
+  
+        // admin can submit another address
     }
 
     #[test]
@@ -171,7 +236,9 @@ mod tests {
         //
         let new_owner = mock_info("max", &coins(2, "token"));
         let old_owner = mock_info("creator", &coins(2, "token"));
-        let msg = ExecuteMsg::ResetOwner {owner: new_owner.sender};
+        let msg = ExecuteMsg::ResetOwner {
+            owner: new_owner.sender,
+        };
         let _res = execute(deps.as_mut(), mock_env(), old_owner, msg).unwrap();
 
         let res = query(deps.as_ref(), mock_env(), QueryMsg::GetOwner {}).unwrap();
